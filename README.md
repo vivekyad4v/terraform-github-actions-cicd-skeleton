@@ -1,5 +1,11 @@
+#### Get the plan on PR using Github actions (check .github/workflows/deploy.yml)
 
-### Run Terraform on local
+![alt text](https://github.com/vivekyad4v/terraform-github-actions-cicd-skeleton/blob/main/terraform-github-actions-cicd-skeleton.png?raw=true)
+
+#### Check github actions workflow 
+URL - https://github.com/vivekyad4v/terraform-github-actions-cicd-skeleton/blob/main/.github/workflows/deploy.yml
+
+## Run Terraform on local
 
 #### Setup Auth 
 ```
