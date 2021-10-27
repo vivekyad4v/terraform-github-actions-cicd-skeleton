@@ -1,0 +1,164 @@
+name: Terraform CICD workflow
+on:
+  push:
+    branches:
+      - main
+      - stg
+  pull_request:
+    branches:
+      - 'stg**'
+      - 'main**'
+
+jobs:
+  Fetch-Branch-Name:
+    runs-on: ubuntu-20.04
+    outputs:
+      branch: ${{ steps.fetch_current_branch.outputs.branch }}
+    steps:
+      - name: Fetch current branch
+        shell: bash
+        run: |
+          if [[ -z "$GITHUB_BASE_REF" ]]; then
+             export BRANCH_NAME=$(echo ${GITHUB_REF#refs/heads/} | cut -f1 -d"-")
+          else 
+             export BRANCH_NAME=${GITHUB_BASE_REF}
+          fi
+          echo "Deploying for Branch - ${BRANCH_NAME}"
+          echo "::set-output name=branch::${BRANCH_NAME}"
+        id: fetch_current_branch
+
+  Terraform-Run:
+    needs: Fetch-Branch-Name
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        region: [ap-southeast-1, ap-south-1]
+    environment: ${{needs.Fetch-Branch-Name.outputs.branch}}
+    env:
+      RUNNER_ALLOW_RUNASROOT: 1
+      CURRENT_BRANCH: ${{needs.Fetch-Branch-Name.outputs.branch}}
+      TF_VAR_s3_bucket_name: vorg-${{ secrets.ENVIRON }}-tf-rss-${{ secrets.AWS_ACCOUNT_ID }}-${{ matrix.region }}
+      TF_VAR_project: ${{ github.event.repository.name }}
+      TF_VAR_dynamodb_table_name: vorg-${{ secrets.ENVIRON }}-tf-rslt-${{ matrix.region }}
+      TF_VAR_environ: ${{ secrets.ENVIRON }}
+      TF_VAR_region: ${{ matrix.region }}
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout SCM
+        uses: actions/checkout@v2
+      - run: echo Branch - $CURRENT_BRANCH, repo - ${{ github.repository }}
+      - name: Setup AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ matrix.region }}
+          role-to-assume: ${{ secrets.ASSUME_ROLE_ARN }}
+          role-session-name: ${{ github.event.repository.name }}
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.9
+      - name: Init
+        shell: bash
+        id: init
+        run: >
+          terraform init \
+            -backend-config "bucket=${TF_VAR_s3_bucket_name}" \
+            -backend-config "dynamodb_table=${TF_VAR_dynamodb_table_name}" \
+            -backend-config "region=${TF_VAR_region}" \
+            -backend-config "key=${TF_VAR_project}/${TF_VAR_environ}.tfstate" \
+            -backend=true \
+            -input=false \
+            -no-color
+      - name: Validate
+        id: validate
+        run: terraform validate -no-color
+      - name: Plan
+        # env:
+        #   TF_LOG: TRACE
+        timeout-minutes: 15
+        id: plan
+        run: terraform plan -input=false -no-color
+        continue-on-error: true
+      - name: Update Pull Request
+        uses: actions/github-script@v5
+        if: github.event_name == 'pull_request'
+        env:
+          init_out: ${{ steps.init.outputs.stdout }}
+          init_err: ${{ steps.init.outputs.stderr }}
+          validate_out: ${{ steps.validate.outputs.stdout }}
+          validate_err: ${{ steps.validate.outputs.stderr }}
+          plan_out: "${{ steps.plan.outputs.stdout }}"
+          plan_err: "${{ steps.plan.outputs.stderr }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const CODE_BLOCK = '```';
+            const fmt_result = '${{ steps.fmt.outcome }}' === 'failure' ? ':x:' : ':heavy_check_mark:';
+            const init_result = '${{ steps.init.outcome }}' === 'failure' ? ':x:' : ':heavy_check_mark:';
+            const validate_result = '${{ steps.validate.outcome }}' === 'failure' ? ':x:' : ':heavy_check_mark:';
+            const plan_result = '${{ steps.plan.outcome }}' === 'failure' ? ':x:' : ':heavy_check_mark:';
+
+            const output = `
+            ### ${ init_result } Terraform Initialization ⚙️
+            <details><summary>Logs</summary>
+
+            Output
+
+            ${ CODE_BLOCK }
+            ${ process.env.init_out }
+            ${ CODE_BLOCK }
+
+            Errors
+
+            ${ CODE_BLOCK }
+            ${ process.env.init_err }
+            ${ CODE_BLOCK }
+            </details> <!-- End Init Logs -->
+
+            ### ${ validate_result } Terraform Validation 🤖
+            <details><summary>Logs</summary>
+
+            Output
+
+            ${ CODE_BLOCK }
+            ${ process.env.validate_out }
+            ${ CODE_BLOCK }
+
+            Errors
+
+            ${ CODE_BLOCK }
+            ${ process.env.validate_err }
+            ${ CODE_BLOCK }
+            </details> <!-- End Validate Logs -->
+
+            ### ${ plan_result } Terraform Plan 📖
+            <details><summary>Logs</summary>
+
+            Output
+
+            ${ CODE_BLOCK }terraform
+            ${ process.env.plan_out }
+            ${ CODE_BLOCK }
+
+            Errors
+            
+            ${ CODE_BLOCK }terraform
+            ${ process.env.plan_err }
+            ${ CODE_BLOCK }
+            </details> <!-- End Plan Logs -->
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Region: \`${{ matrix.region }}\`*`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+      - name: Terraform Apply
+        if: github.event_name == 'push'
+        run: terraform apply -auto-approve -no-color
