@@ -1,0 +1,25 @@
+name: Terraform CICD workflow
+on:
+  push:
+    branches:
+      - main
+      - stg
+  pull_request:
+    branches:
+      - 'stg**'
+      - 'main**'
+jobs:
+  Terraform-Run:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout SCM
+        uses: actions/checkout@v2
+      - name: Setup AWS credentials
+        uses: aws-actions/configure-aws-credentials@master
+        with:
+          aws-region: ap-south-1
+          role-to-assume: ${{ secrets.ASSUME_ROLE_ARN }}
+          role-session-name: ${{ github.event.repository.name }}-deploy
+      - name: Verify AWS Credentials
+        run: |
+          aws sts get-caller-identity
